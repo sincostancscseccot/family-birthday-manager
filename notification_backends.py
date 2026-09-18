@@ -70,6 +70,15 @@ class AndroidReminderBackend:
     async def notifications_enabled(self) -> bool:
         return bool(await self.service.are_notifications_enabled())
 
+    async def can_schedule_exact(self) -> bool:
+        return bool(await self.service.can_schedule_exact_notifications())
+
+    async def request_exact_alarm_permission(self) -> bool:
+        return bool(await self.service.request_exact_alarm_permission())
+
+    async def pending_notifications(self) -> list[dict]:
+        return list(await self.service.get_pending_notifications())
+
     async def refresh(
         self,
         records: list[BirthdayRecord],
@@ -83,6 +92,9 @@ class AndroidReminderBackend:
             return ReminderRefreshResult("android", 0, "Android 本地提醒已关闭。")
 
         occurrences = build_reminder_occurrences(records, settings)
+        exact_allowed = await self.can_schedule_exact()
+        schedule_mode = "exact_allow_while_idle" if exact_allowed else "inexact_allow_while_idle"
+
         for item in occurrences:
             await self.service.schedule_notification(
                 notification_id=item.notification_id,
@@ -93,12 +105,14 @@ class AndroidReminderBackend:
                 channel_id="birthday_reminders",
                 channel_name="生日提醒",
                 channel_description="家庭生日管理器的本地生日提醒",
+                schedule_mode=schedule_mode,
             )
 
+        mode_text = "精确后台模式" if exact_allowed else "非精确兼容模式"
         return ReminderRefreshResult(
             "android",
             len(occurrences),
-            f"已向 Android 注册 {len(occurrences)} 条本地生日提醒。",
+            f"已向 Android 注册 {len(occurrences)} 条本地生日提醒（{mode_text}）。",
         )
 
     async def show_test_notification(self) -> None:
