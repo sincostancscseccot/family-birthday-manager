@@ -32,4 +32,5 @@ usesCleartextTraffic = "true"
 [tool.flet.android.permission]
 "android.permission.INTERNET" = true
 "android.permission.POST_NOTIFICATIONS" = true
+"android.permission.SCHEDULE_EXACT_ALARM" = true
 "android.permission.RECEIVE_BOOT_COMPLETED" = true
