@@ -214,16 +214,31 @@ class LanSyncServer:
                 self._send(200, merged, "application/json; charset=utf-8")
 
         self._httpd = ThreadingHTTPServer(("0.0.0.0", 0), Handler)
+        # ThreadingMixIn defaults to non-daemon request threads and waits for them
+        # during server_close(). A desktop GUI must never be kept alive by a
+        # stale HTTP request after the window is closed.
+        self._httpd.daemon_threads = True
+        self._httpd.block_on_close = False
         self.port = int(self._httpd.server_address[1])
-        self._thread = threading.Thread(target=self._httpd.serve_forever, name="birthday-lan-sync", daemon=True)
+        self._thread = threading.Thread(
+            target=lambda: self._httpd.serve_forever(poll_interval=0.1) if self._httpd else None,
+            name="birthday-lan-sync",
+            daemon=True,
+        )
         self._thread.start()
 
     def stop(self) -> None:
         httpd = self._httpd
-        self._httpd = None
+        thread = self._thread
         if httpd is not None:
+            # shutdown() asks serve_forever() to return; server_close() then
+            # releases the listening socket. Request threads are daemonized in
+            # start(), so they cannot keep the application process alive.
             httpd.shutdown()
             httpd.server_close()
+        if thread is not None and thread is not threading.current_thread() and thread.is_alive():
+            thread.join(timeout=2.0)
+        self._httpd = None
         self._thread = None
         self.port = None
 
