@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import html
 import io
 import ipaddress
@@ -114,13 +113,15 @@ def sync_with_peer(address: str, pair_code: str, local_backup: bytes, timeout: f
     return data
 
 
-def qr_png_base64(text: str) -> str:
+def qr_svg(text: str) -> str:
+    """Generate an SVG QR code without Pillow/native image dependencies."""
     import qrcode
+    import qrcode.image.svg
 
-    image = qrcode.make(text)
+    image = qrcode.make(text, image_factory=qrcode.image.svg.SvgPathImage)
     buf = io.BytesIO()
-    image.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode("ascii")
+    image.save(buf)
+    return buf.getvalue().decode("utf-8")
 
 
 class LanSyncServer:
