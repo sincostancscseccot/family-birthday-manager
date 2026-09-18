@@ -87,7 +87,8 @@ def build_reminder_occurrences(
         if record.deleted:
             continue
 
-        reminders = sorted({int(x) for x in (record.reminders or [7, 1, 0]) if int(x) >= 0}, reverse=True)
+        source_reminders = record.reminders if record.reminders is not None else [7, 1, 0]
+        reminders = sorted({int(x) for x in source_reminders if int(x) >= 0}, reverse=True)
         for birthday in occurrences_between(record, start_year, end_year):
             birthday_dt = datetime.combine(birthday, time(settings.hour, settings.minute))
             for days_before in reminders:
