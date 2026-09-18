@@ -1,18 +1,31 @@
 [project]
 name = "family_birthday_manager"
-version = "0.1.0"
+version = "0.2.0"
 description = "Offline family birthday manager for Windows and Android with Gregorian/Lunar support"
 requires-python = ">=3.10,<3.15"
 dependencies = [
-  "flet[all]==1.0.0",
+  "flet==1.0.0",
   "lunardate==0.3.0",
+  "qrcode==8.2",
+]
+
+[dependency-groups]
+dev = [
+  "flet[all]==1.0.0",
 ]
 
 [tool.flet]
 product = "家庭生日管理器"
 org = "com.local"
 bundle_id = "com.local.familybirthday"
-build_number = 1
+build_number = 2
 
 [tool.flet.app]
 module = "main.py"
+
+
+[tool.flet.android.manifest_application]
+usesCleartextTraffic = "true"
+
+[tool.flet.android.permission]
+"android.permission.INTERNET" = true
