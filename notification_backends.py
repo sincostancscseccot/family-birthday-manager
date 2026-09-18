@@ -120,7 +120,10 @@ async def refresh_platform_notifications(
 ) -> ReminderRefreshResult:
     platform = platform.lower()
     if "windows" in platform:
-        return await asyncio.to_thread(refresh_windows_notifications, records, settings)
+        # Keep scheduling on the app event loop. It is a short, OS-native
+        # registration operation and avoids leaving an unkillable worker thread
+        # behind if the user closes the Windows app mid-refresh.
+        return refresh_windows_notifications(records, settings)
     if "android" in platform:
         if android_backend is None:
             raise RuntimeError("Android 通知服务尚未初始化。")
