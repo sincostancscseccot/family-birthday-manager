@@ -536,7 +536,7 @@ async def main(page: ft.Page):
                         return
                     await android_notifications.show_test_notification()
                 elif is_windows():
-                    await asyncio.to_thread(show_windows_test_notification)
+                    show_windows_test_notification()
                 else:
                     dialog_status.value = "当前平台暂不支持应用通知；请继续使用 ICS。"
                     page.update()
