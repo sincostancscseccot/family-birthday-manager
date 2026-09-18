@@ -39,3 +39,25 @@ def test_lan_roundtrip():
         assert ids == ["server", "client"]
     finally:
         server.stop()
+
+
+def test_server_stop_releases_thread():
+    state = {"payload": _sample("server")}
+
+    def get_backup():
+        return state["payload"]
+
+    def merge_backup(raw: bytes):
+        return raw
+
+    server = LanSyncServer(get_backup, merge_backup)
+    server.host_ip = "127.0.0.1"
+    server.start()
+    thread = server._thread
+    assert thread is not None and thread.is_alive()
+
+    server.stop()
+
+    assert server.port is None
+    assert server._thread is None
+    assert not thread.is_alive()
