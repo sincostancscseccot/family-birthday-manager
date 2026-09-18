@@ -4,6 +4,7 @@ from datetime import date
 import asyncio
 import sys
 import threading
+import time
 
 import flet as ft
 
@@ -29,11 +30,15 @@ async def main(page: ft.Page):
     records_lock = threading.RLock()
     lan_server: LanSyncServer | None = None
     status = ft.Text("", size=13)
+    shutting_down = False
+    background_tasks: list[asyncio.Task] = []
 
     quick_focused = False
     win_v_pending = False
     win_v_quick_snapshot = ""
     win_v_clipboard_snapshot: str | None = None
+    win_v_clipboard_sequence: int | None = None
+    win_v_deadline = 0.0
 
     def is_windows() -> bool:
         return sys.platform == "win32" or str(page.platform).lower().endswith("windows")
@@ -51,16 +56,37 @@ async def main(page: ft.Page):
         except Exception:
             return False
 
+    def windows_clipboard_sequence() -> int | None:
+        if sys.platform != "win32":
+            return None
+        try:
+            import ctypes
+            return int(ctypes.windll.user32.GetClipboardSequenceNumber())
+        except Exception:
+            return None
+
     async def arm_win_v_history() -> None:
         nonlocal win_v_pending, win_v_quick_snapshot, win_v_clipboard_snapshot
-        if not is_windows():
+        nonlocal win_v_clipboard_sequence, win_v_deadline
+        if not is_windows() or win_v_pending:
             return
         try:
             win_v_clipboard_snapshot = await ft.Clipboard().get()
         except Exception:
             win_v_clipboard_snapshot = None
+        win_v_clipboard_sequence = windows_clipboard_sequence()
         win_v_quick_snapshot = quick.value or ""
+        win_v_deadline = time.monotonic() + 5.0
         win_v_pending = True
+
+    def clear_win_v_pending() -> None:
+        nonlocal win_v_pending, win_v_quick_snapshot, win_v_clipboard_snapshot
+        nonlocal win_v_clipboard_sequence, win_v_deadline
+        win_v_pending = False
+        win_v_quick_snapshot = ""
+        win_v_clipboard_snapshot = None
+        win_v_clipboard_sequence = None
+        win_v_deadline = 0.0
 
     async def paste_quick_from_clipboard(e=None, *, announce: bool = True) -> None:
         try:
@@ -84,10 +110,8 @@ async def main(page: ft.Page):
 
     async def on_quick_blur(e) -> None:
         nonlocal quick_focused
-        # Windows 的 Win+V 面板可能先让 TextField 失焦，且不会走 Flutter
-        # 的普通粘贴路径。趁组合键仍按下时记住这次操作。
-        if quick_focused and win_v_keys_down():
-            await arm_win_v_history()
+        # Windows 的 Win+V 面板可能会让 TextField 暂时失焦。真正的组合键
+        # 检测由后台的 Win32 GetAsyncKeyState 轮询完成，因此这里不取消等待。
         quick_focused = False
 
     quick = ft.TextField(
@@ -102,6 +126,35 @@ async def main(page: ft.Page):
     def active_records():
         with records_lock:
             return [r for r in records if not r.deleted]
+
+    def stop_lan_server() -> None:
+        nonlocal lan_server
+        server = lan_server
+        lan_server = None
+        if server is not None:
+            server.stop()
+
+    async def cleanup_before_exit() -> None:
+        nonlocal shutting_down
+        if shutting_down:
+            return
+        shutting_down = True
+
+        # Persist first, then stop network/background work. None of these cleanup
+        # tasks are allowed to keep the Windows executable alive after the
+        # visible window has closed.
+        try:
+            save_all()
+        except Exception:
+            pass
+
+        for task in list(background_tasks):
+            if not task.done():
+                task.cancel()
+        if background_tasks:
+            await asyncio.gather(*background_tasks, return_exceptions=True)
+
+        await asyncio.to_thread(stop_lan_server)
 
     def set_status(message: str):
         status.value = message
@@ -327,36 +380,83 @@ async def main(page: ft.Page):
             set_status(str(exc))
 
     async def handle_global_keyboard(e: ft.KeyboardEvent):
-        # Flet 能收到 Meta/Windows 修饰键时，这是最直接的 Win+V 检测路径。
+        # Flutter 有时收不到被 Windows Shell 截获的 Win+V；能收到时仍作为
+        # 快速路径保留，后台 Win32 轮询负责兜底。
         if is_windows() and quick_focused and e.meta and str(e.key).lower() == "v":
             await arm_win_v_history()
 
+    async def win_v_watch_loop():
+        nonlocal quick_focused
+        previous_chord = False
+        while not shutting_down:
+            chord = win_v_keys_down()
+            if quick_focused and chord and not previous_chord:
+                await arm_win_v_history()
+            previous_chord = chord
+
+            if win_v_pending:
+                if time.monotonic() >= win_v_deadline:
+                    clear_win_v_pending()
+                else:
+                    seq = windows_clipboard_sequence()
+                    sequence_changed = (
+                        win_v_clipboard_sequence is not None
+                        and seq is not None
+                        and seq != win_v_clipboard_sequence
+                    )
+                    if sequence_changed:
+                        # Windows 已经把历史项写回系统剪贴板，再给 Clipboard
+                        # 服务一点时间读取新值。
+                        await asyncio.sleep(0.05)
+                        try:
+                            contents = await ft.Clipboard().get()
+                        except Exception:
+                            contents = None
+                        if (
+                            contents
+                            and (quick.value or "") == win_v_quick_snapshot
+                        ):
+                            quick.value = contents
+                            quick.update()
+                            status.value = "已接收 Win+V 选中的剪贴板历史内容。"
+                            page.update()
+                        clear_win_v_pending()
+
+            await asyncio.sleep(0.04)
+
     async def handle_window_event(e: ft.WindowEvent):
-        nonlocal win_v_pending, win_v_quick_snapshot, win_v_clipboard_snapshot
-        if not is_windows():
+        if e.type == ft.WindowEventType.CLOSE:
+            await cleanup_before_exit()
+            # prevent_close=True gives Python a chance to stop LAN services and
+            # release sockets/files before Flutter destroys the native window.
+            await page.window.destroy()
             return
+
         if e.type == ft.WindowEventType.FOCUS and win_v_pending:
-            # 给 Windows 剪贴板历史面板一点时间完成“选择并返回应用”。
-            await asyncio.sleep(0.12)
-            try:
-                contents = await ft.Clipboard().get()
-                # 仅当用户没有在等待期间修改输入框时自动补入，避免覆盖输入。
+            # 旧版兼容路径：如果系统面板切走了应用焦点，返回时再检查一次。
+            await asyncio.sleep(0.08)
+            seq = windows_clipboard_sequence()
+            if (
+                win_v_clipboard_sequence is not None
+                and seq is not None
+                and seq != win_v_clipboard_sequence
+            ):
+                try:
+                    contents = await ft.Clipboard().get()
+                except Exception:
+                    contents = None
                 if contents and (quick.value or "") == win_v_quick_snapshot:
                     quick.value = contents
                     quick.update()
-                    if contents != win_v_clipboard_snapshot:
-                        status.value = "已接收 Win+V 选中的剪贴板历史内容。"
-                    else:
-                        status.value = "已从 Win+V 剪贴板历史粘贴。"
+                    status.value = "已接收 Win+V 选中的剪贴板历史内容。"
                     page.update()
-            finally:
-                win_v_pending = False
-                win_v_quick_snapshot = ""
-                win_v_clipboard_snapshot = None
+                clear_win_v_pending()
 
     page.on_keyboard_event = handle_global_keyboard
     if is_windows():
+        page.window.prevent_close = True
         page.window.on_event = handle_window_event
+        background_tasks.append(asyncio.create_task(win_v_watch_loop()))
 
     async def export_backup(e):
         data = backup_bytes()
@@ -448,10 +548,7 @@ async def main(page: ft.Page):
         client_status = ft.Text("", size=13)
 
         def stop_host():
-            nonlocal lan_server
-            if lan_server is not None:
-                lan_server.stop()
-                lan_server = None
+            stop_lan_server()
 
         def close_dialog(e=None):
             stop_host()
