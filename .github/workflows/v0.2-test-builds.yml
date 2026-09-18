@@ -94,8 +94,11 @@ jobs:
       - name: Rebuild patched APK
         shell: bash
         run: |
+          FLUTTER_BIN="$(find "$HOME/flutter" -type f -path "*/bin/flutter" -print -quit)"
+          test -n "$FLUTTER_BIN"
+          echo "Using Flutter: $FLUTTER_BIN"
           cd build/flutter
-          flutter build apk --release
+          "$FLUTTER_BIN" build apk --release
           test -f build/app/outputs/flutter-apk/app-release.apk
 
       - name: Package APK
