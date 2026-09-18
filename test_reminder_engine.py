@@ -36,3 +36,10 @@ def test_notification_ids_are_stable_and_nonzero():
     b = build_reminder_occurrences([record], settings, datetime(2026, 9, 1, 12, 0))
     assert [x.notification_id for x in a] == [x.notification_id for x in b]
     assert all(x.notification_id > 0 for x in a)
+
+
+def test_explicit_empty_reminders_stays_empty():
+    record = BirthdayRecord.new(name="A", calendar="solar", month=10, day=1)
+    record.reminders = []
+    settings = ReminderSettings(enabled=True)
+    assert build_reminder_occurrences([record], settings, datetime(2026, 9, 1, 12, 0)) == []
