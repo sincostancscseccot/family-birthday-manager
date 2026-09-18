@@ -547,6 +547,29 @@ async def main(page: ft.Page):
                 dialog_status.value = f"测试通知失败：{exc}"
                 page.update()
 
+        async def check_android_scheduler(e):
+            if not is_android():
+                dialog_status.value = "调度诊断仅适用于 Android。"
+                page.update()
+                return
+            if android_notifications is None:
+                dialog_status.value = "Android 通知服务不可用。"
+                page.update()
+                return
+            try:
+                notification_ok = await android_notifications.notifications_enabled()
+                exact_ok = await android_notifications.can_schedule_exact()
+                pending = await android_notifications.pending_notifications()
+                dialog_status.value = (
+                    f"Android 调度状态：通知权限={'已开启' if notification_ok else '未开启'}；"
+                    f"精确闹钟={'已允许' if exact_ok else '未允许'}；"
+                    f"系统当前记录的待触发通知={len(pending)} 条。"
+                )
+                page.update()
+            except Exception as exc:
+                dialog_status.value = f"读取 Android 调度状态失败：{exc}"
+                page.update()
+
         async def save_and_refresh(e):
             try:
                 new_settings = ReminderSettings(
@@ -563,6 +586,7 @@ async def main(page: ft.Page):
                 reminder_settings.horizon_years = new_settings.horizon_years
                 save_reminder_settings(reminder_settings)
 
+                exact_allowed = True
                 if reminder_settings.enabled and is_android():
                     if android_notifications is None:
                         raise RuntimeError("Android 通知服务不可用。")
@@ -575,6 +599,14 @@ async def main(page: ft.Page):
                         page.update()
                         return
 
+                    exact_allowed = await android_notifications.can_schedule_exact()
+                    if not exact_allowed:
+                        # Android 12+ exact alarms are a separate special access.
+                        # The plugin opens the system page when needed.
+                        await android_notifications.request_exact_alarm_permission()
+                        await asyncio.sleep(0.2)
+                        exact_allowed = await android_notifications.can_schedule_exact()
+
                 await refresh_local_reminders(announce=False)
                 count = preview_count()
                 reminder_summary.value = (
@@ -582,11 +614,17 @@ async def main(page: ft.Page):
                     if reminder_settings.enabled
                     else "应用本地通知未启用；ICS 仍可使用"
                 )
-                dialog_status.value = (
-                    f"已保存。当前预计注册 {count} 条本地提醒。"
-                    if reminder_settings.enabled
-                    else "已关闭应用本地通知；ICS 仍可继续作为兜底。"
-                )
+                if reminder_settings.enabled and is_android() and not exact_allowed:
+                    dialog_status.value = (
+                        f"已保存并注册约 {count} 条提醒，但尚未获得“精确闹钟”权限，"
+                        "当前只能使用兼容模式；清后台后可能不可靠。请授予精确闹钟权限后再点一次“保存并刷新提醒”。"
+                    )
+                else:
+                    dialog_status.value = (
+                        f"已保存。当前预计注册 {count} 条本地提醒。"
+                        if reminder_settings.enabled
+                        else "已关闭应用本地通知；ICS 仍可继续作为兜底。"
+                    )
                 page.update()
             except Exception as exc:
                 dialog_status.value = f"保存失败：{exc}"
@@ -623,6 +661,7 @@ async def main(page: ft.Page):
             ),
             actions=[
                 ft.TextButton("发送测试通知", on_click=test_notification),
+                ft.TextButton("检查调度状态", on_click=check_android_scheduler, visible=is_android()),
                 ft.TextButton("关闭", on_click=lambda e: page.pop_dialog()),
                 ft.Button("保存并刷新提醒", icon=ft.Icons.NOTIFICATIONS_ACTIVE, on_click=save_and_refresh),
             ],
