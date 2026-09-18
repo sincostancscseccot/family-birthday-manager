@@ -1,0 +1,132 @@
+name: Publish release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/release-version"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  tests:
+    name: Release tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install test dependencies
+        run: python -m pip install --upgrade pip pytest lunardate==0.3.0 qrcode==8.2
+
+      - name: Run tests
+        run: python -m pytest -q
+
+      - name: Compile-check Python sources
+        run: python -m compileall -q main.py birthday_core.py storage.py lan_sync.py
+
+      - name: Verify release version matches pyproject
+        shell: bash
+        run: |
+          VERSION="$(tr -d '[:space:]' < .github/release-version)"
+          PROJECT_VERSION="$(python - <<'PY'
+          import tomllib
+          with open("pyproject.toml", "rb") as f:
+              print(tomllib.load(f)["project"]["version"])
+          PY
+          )"
+          test "$VERSION" = "$PROJECT_VERSION"
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: tests
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: windows
+            runner: windows-latest
+          - target: apk
+            runner: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Build Flet app
+        id: flet-build
+        uses: flet-dev/flet-build-action@v1
+        with:
+          target: ${{ matrix.target }}
+          runner-python-version: "3.13"
+          bundled-python-version: "3.13"
+          build-number: ${{ github.run_number }}
+
+      - name: Upload release build
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.target }}
+          path: ${{ steps.flet-build.outputs.archive-path }}
+          archive: false
+          if-no-files-found: error
+          overwrite: false
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Read release version
+        id: version
+        shell: bash
+        run: |
+          VERSION="$(tr -d '[:space:]' < .github/release-version)"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Give assets stable names
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          mv release-assets/flet-windows.zip "release-assets/family-birthday-manager-v${VERSION}-windows.zip"
+          mv release-assets/flet-apk.zip "release-assets/family-birthday-manager-v${VERSION}-android-apk.zip"
+          ls -lah release-assets
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="v${VERSION}"
+          NOTES=".github/release-notes/${TAG}.md"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; refusing to overwrite it."
+            exit 1
+          fi
+          gh release create "$TAG" \
+            release-assets/family-birthday-manager-v${VERSION}-windows.zip \
+            release-assets/family-birthday-manager-v${VERSION}-android-apk.zip \
+            --target "$GITHUB_SHA" \
+            --title "$TAG" \
+            --notes-file "$NOTES" \
+            --latest
