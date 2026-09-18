@@ -15,7 +15,7 @@ from birthday_core import (
     validate_record,
 )
 from storage import export_backup_bytes, import_backup_bytes, load_records, save_records
-from lan_sync import LanSyncServer, qr_png_base64, sync_with_peer
+from lan_sync import LanSyncServer, qr_svg, sync_with_peer
 
 
 async def main(page: ft.Page):
@@ -379,7 +379,7 @@ async def main(page: ft.Page):
                 else:
                     host_status.value = "已启动。保持此窗口打开，另一台设备即可连接。"
                 try:
-                    qr_image.src = qr_png_base64(lan_server.browser_url)
+                    qr_image.src = qr_svg(lan_server.browser_url)
                     qr_image.visible = True
                 except Exception as exc:
                     qr_image.visible = False
