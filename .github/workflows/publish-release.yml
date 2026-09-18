@@ -93,7 +93,7 @@ jobs:
         id: version
         shell: bash
         run: |
-          VERSION="$(tr -d '[:space:]' < .github/release-version)"
+          VERSION="$(grep -v '^[[:space:]]*#' .github/release-version | head -n1 | tr -d '[:space:]')"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Download release artifacts
@@ -102,6 +102,7 @@ jobs:
           pattern: flet-*
           path: release-assets
           merge-multiple: true
+          skip-decompress: true
 
       - name: Give assets stable names
         shell: bash
