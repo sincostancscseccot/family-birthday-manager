@@ -644,7 +644,7 @@ async def main(page: ft.Page):
                         [
                             ft.Column([
                                 ft.Text("家庭生日管理器", size=28, weight=ft.FontWeight.BOLD),
-                                ft.Text("公历 + 农历 · 完全离线 · Windows / Android · v0.2 开发版", size=13),
+                                ft.Text("公历 + 农历 · 完全离线 · Windows / Android · v0.2.0", size=13),
                             ], spacing=2, expand=True),
                             ft.Button("添加生日", icon=ft.Icons.ADD, on_click=lambda e: open_editor()),
                         ]
