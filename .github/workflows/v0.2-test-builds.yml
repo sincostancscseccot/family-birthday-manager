@@ -94,11 +94,35 @@ jobs:
       - name: Rebuild patched APK
         shell: bash
         run: |
+          ROOT="$GITHUB_WORKSPACE"
           FLUTTER_BIN="$(find "$HOME/flutter" -type f -path "*/bin/flutter" -print -quit)"
+          SITE_PACKAGES="$ROOT/build/site-packages"
+
+          APP_DIR=""
+          for candidate in "$ROOT/build/python-app" "$ROOT/build/app"; do
+            if [ -d "$candidate" ]; then
+              APP_DIR="$candidate"
+              break
+            fi
+          done
+
           test -n "$FLUTTER_BIN"
+          test -d "$SITE_PACKAGES"
+          test -n "$APP_DIR"
+          test -d "$APP_DIR"
+
           echo "Using Flutter: $FLUTTER_BIN"
+          echo "SERIOUS_PYTHON_SITE_PACKAGES=$SITE_PACKAGES"
+          echo "SERIOUS_PYTHON_APP=$APP_DIR"
+
+          export SERIOUS_PYTHON_SITE_PACKAGES="$SITE_PACKAGES"
+          export SERIOUS_PYTHON_APP="$APP_DIR"
+          export SERIOUS_PYTHON_VERSION="3.13"
+
           cd build/flutter
-          "$FLUTTER_BIN" build apk --release
+          "$FLUTTER_BIN" build apk --release \
+            --build-name=0.3.0 \
+            --build-number="$GITHUB_RUN_NUMBER"
           test -f build/app/outputs/flutter-apk/app-release.apk
 
       - name: Package APK
