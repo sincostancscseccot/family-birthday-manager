@@ -740,6 +740,7 @@ async def main(page: ft.Page):
             records.clear()
             records.extend(merged)
             save_all()
+            queue_reminder_refresh()
             set_status("导入完成：已按记录 ID 和更新时间合并，不会简单覆盖另一端新增的数据。")
             render_list()
         except Exception as exc:
@@ -791,6 +792,7 @@ async def main(page: ft.Page):
 
         def close_dialog(e=None):
             stop_host()
+            queue_reminder_refresh()
             page.pop_dialog()
             render_list()
             set_status("局域网同步窗口已关闭。")
@@ -836,6 +838,7 @@ async def main(page: ft.Page):
                     records.clear()
                     records.extend(merged)
                     save_records(records)
+                queue_reminder_refresh()
                 client_status.value = "同步成功：两端数据已合并，本机已保存最新结果。"
                 render_list()
             except Exception as exc:
@@ -883,7 +886,7 @@ async def main(page: ft.Page):
                         [
                             ft.Column([
                                 ft.Text("家庭生日管理器", size=28, weight=ft.FontWeight.BOLD),
-                                ft.Text("公历 + 农历 · 完全离线 · Windows / Android · v0.2.0", size=13),
+                                ft.Text("公历 + 农历 · 完全离线 · Windows / Android · v0.3 开发版", size=13),
                             ], spacing=2, expand=True),
                             ft.Button("添加生日", icon=ft.Icons.ADD, on_click=lambda e: open_editor()),
                         ]
@@ -901,6 +904,18 @@ async def main(page: ft.Page):
                         ]
                     ),
                     status,
+                    ft.Row(
+                        [
+                            ft.Button("提醒设置", icon=ft.Icons.NOTIFICATIONS_ACTIVE, on_click=open_reminder_settings),
+                            ft.Text(
+                                "应用本地通知 + ICS 双保险"
+                                if reminder_settings.enabled
+                                else "应用本地通知未启用；ICS 仍可使用",
+                                size=13,
+                            ),
+                        ],
+                        wrap=True,
+                    ),
                     ft.Text("最近生日", size=20, weight=ft.FontWeight.BOLD),
                     birthday_list,
                     ft.Divider(),
@@ -936,6 +951,8 @@ async def main(page: ft.Page):
         )
     )
     render_list()
+    if reminder_settings.enabled:
+        track_task(asyncio.create_task(refresh_local_reminders()))
 
 
 if __name__ == "__main__":
