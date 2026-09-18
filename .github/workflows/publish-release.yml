@@ -36,7 +36,7 @@ jobs:
       - name: Verify release version matches pyproject
         shell: bash
         run: |
-          VERSION="$(tr -d '[:space:]' < .github/release-version)"
+          VERSION="$(grep -v '^[[:space:]]*#' .github/release-version | head -n1 | tr -d '[:space:]')"
           PROJECT_VERSION="$(python - <<'PY'
           import tomllib
           with open("pyproject.toml", "rb") as f:
@@ -99,7 +99,7 @@ jobs:
       - name: Download release artifacts
         uses: actions/download-artifact@v8
         with:
-          pattern: release-*
+          pattern: flet-*
           path: release-assets
           merge-multiple: true
 
