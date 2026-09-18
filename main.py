@@ -16,8 +16,21 @@ from birthday_core import (
     parse_quick,
     validate_record,
 )
-from storage import export_backup_bytes, import_backup_bytes, load_records, save_records
+from storage import (
+    export_backup_bytes,
+    import_backup_bytes,
+    load_records,
+    load_reminder_settings,
+    save_records,
+    save_reminder_settings,
+)
 from lan_sync import LanSyncServer, qr_svg, sync_with_peer
+from reminder_engine import ReminderSettings, build_reminder_occurrences
+from notification_backends import (
+    AndroidReminderBackend,
+    refresh_platform_notifications,
+    show_windows_test_notification,
+)
 
 
 async def main(page: ft.Page):
@@ -27,8 +40,10 @@ async def main(page: ft.Page):
     page.theme_mode = ft.ThemeMode.SYSTEM
 
     records = load_records()
+    reminder_settings = load_reminder_settings()
     records_lock = threading.RLock()
     lan_server: LanSyncServer | None = None
+    android_notifications: AndroidReminderBackend | None = None
     status = ft.Text("", size=13)
     shutting_down = False
     background_tasks: list[asyncio.Task] = []
@@ -40,8 +55,20 @@ async def main(page: ft.Page):
     win_v_clipboard_sequence: int | None = None
     win_v_deadline = 0.0
 
+    def platform_name() -> str:
+        return str(page.platform).lower()
+
     def is_windows() -> bool:
-        return sys.platform == "win32" or str(page.platform).lower().endswith("windows")
+        return sys.platform == "win32" or platform_name().endswith("windows")
+
+    def is_android() -> bool:
+        return platform_name().endswith("android")
+
+    if is_android():
+        try:
+            android_notifications = AndroidReminderBackend()
+        except Exception as exc:
+            status.value = f"Android 通知服务初始化失败：{exc}"
 
     def win_v_keys_down() -> bool:
         if sys.platform != "win32":
