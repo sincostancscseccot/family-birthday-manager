@@ -9,6 +9,11 @@ dependencies = [
   "qrcode==8.2",
 ]
 
+[dependency-groups]
+dev = [
+  "flet[all]==1.0.0",
+]
+
 [tool.flet]
 product = "家庭生日管理器"
 org = "com.local"
