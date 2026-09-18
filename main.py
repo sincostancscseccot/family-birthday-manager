@@ -149,6 +149,12 @@ async def main(page: ft.Page):
         on_blur=on_quick_blur,
     )
     birthday_list = ft.Column(spacing=8)
+    reminder_summary = ft.Text(
+        "应用本地通知 + ICS 双保险"
+        if reminder_settings.enabled
+        else "应用本地通知未启用；ICS 仍可使用",
+        size=13,
+    )
 
     def active_records():
         with records_lock:
@@ -571,6 +577,11 @@ async def main(page: ft.Page):
 
                 await refresh_local_reminders(announce=False)
                 count = preview_count()
+                reminder_summary.value = (
+                    "应用本地通知 + ICS 双保险"
+                    if reminder_settings.enabled
+                    else "应用本地通知未启用；ICS 仍可使用"
+                )
                 dialog_status.value = (
                     f"已保存。当前预计注册 {count} 条本地提醒。"
                     if reminder_settings.enabled
@@ -907,12 +918,7 @@ async def main(page: ft.Page):
                     ft.Row(
                         [
                             ft.Button("提醒设置", icon=ft.Icons.NOTIFICATIONS_ACTIVE, on_click=open_reminder_settings),
-                            ft.Text(
-                                "应用本地通知 + ICS 双保险"
-                                if reminder_settings.enabled
-                                else "应用本地通知未启用；ICS 仍可使用",
-                                size=13,
-                            ),
+                            reminder_summary,
                         ],
                         wrap=True,
                     ),
