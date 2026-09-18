@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import date
+import asyncio
+import threading
 
 import flet as ft
 
@@ -13,6 +15,7 @@ from birthday_core import (
     validate_record,
 )
 from storage import export_backup_bytes, import_backup_bytes, load_records, save_records
+from lan_sync import LanSyncServer, qr_png_base64, sync_with_peer
 
 
 async def main(page: ft.Page):
@@ -22,6 +25,8 @@ async def main(page: ft.Page):
     page.theme_mode = ft.ThemeMode.SYSTEM
 
     records = load_records()
+    records_lock = threading.RLock()
+    lan_server: LanSyncServer | None = None
     status = ft.Text("", size=13)
     quick = ft.TextField(
         label="快速添加",
@@ -31,14 +36,28 @@ async def main(page: ft.Page):
     birthday_list = ft.Column(spacing=8)
 
     def active_records():
-        return [r for r in records if not r.deleted]
+        with records_lock:
+            return [r for r in records if not r.deleted]
 
     def set_status(message: str):
         status.value = message
         page.update()
 
     def save_all():
-        save_records(records)
+        with records_lock:
+            save_records(records)
+
+    def backup_bytes() -> bytes:
+        with records_lock:
+            return export_backup_bytes(records)
+
+    def merge_lan_backup(raw: bytes) -> bytes:
+        with records_lock:
+            merged = import_backup_bytes(raw, records)
+            records.clear()
+            records.extend(merged)
+            save_records(records)
+            return export_backup_bytes(records)
 
     def record_by_id(record_id: str) -> BirthdayRecord | None:
         return next((r for r in records if r.id == record_id), None)
@@ -244,7 +263,7 @@ async def main(page: ft.Page):
             set_status(str(exc))
 
     async def export_backup(e):
-        data = export_backup_bytes(records)
+        data = backup_bytes()
         name = f"家庭生日备份_{date.today():%Y%m%d}.json"
         try:
             path = await ft.FilePicker().save_file(
@@ -258,7 +277,7 @@ async def main(page: ft.Page):
             set_status(f"导出失败：{exc}")
 
     async def share_backup(e):
-        data = export_backup_bytes(records)
+        data = backup_bytes()
         name = f"家庭生日备份_{date.today():%Y%m%d}.json"
         try:
             await ft.Share().share_files(
@@ -292,7 +311,8 @@ async def main(page: ft.Page):
             set_status(f"导入失败：{exc}")
 
     def ics_bytes() -> bytes:
-        return build_ics(records, years=20).encode("utf-8")
+        with records_lock:
+            return build_ics(records, years=20).encode("utf-8")
 
     async def export_ics(e):
         data = ics_bytes()
@@ -321,6 +341,108 @@ async def main(page: ft.Page):
         except Exception as exc:
             set_status(f"分享失败：{exc}")
 
+    def open_lan_sync(e=None):
+        nonlocal lan_server
+
+        host_status = ft.Text("尚未启动。", size=13)
+        host_info = ft.Text("", selectable=True)
+        qr_image = ft.Image(src=b"", width=220, height=220, visible=False)
+        address_input = ft.TextField(label="另一台设备的地址", hint_text="例如：192.168.1.23:54321")
+        code_input = ft.TextField(label="6 位配对码", hint_text="例如：083521", max_length=6)
+        client_status = ft.Text("", size=13)
+
+        def stop_host():
+            nonlocal lan_server
+            if lan_server is not None:
+                lan_server.stop()
+                lan_server = None
+
+        def close_dialog(e=None):
+            stop_host()
+            page.pop_dialog()
+            render_list()
+            set_status("局域网同步窗口已关闭。")
+
+        def start_host(e):
+            nonlocal lan_server
+            try:
+                stop_host()
+                lan_server = LanSyncServer(backup_bytes, merge_lan_backup)
+                lan_server.start()
+                host_info.value = (
+                    f"局域网地址：{lan_server.address}\n"
+                    f"配对码：{lan_server.pair_code}\n"
+                    f"扫码地址：{lan_server.browser_url}"
+                )
+                if lan_server.host_ip.startswith("127."):
+                    host_status.value = "已启动，但当前只发现本机回环地址；请先连接 Wi-Fi / 局域网。"
+                else:
+                    host_status.value = "已启动。保持此窗口打开，另一台设备即可连接。"
+                try:
+                    qr_image.src = qr_png_base64(lan_server.browser_url)
+                    qr_image.visible = True
+                except Exception as exc:
+                    qr_image.visible = False
+                    host_status.value += f" 二维码生成失败：{exc}"
+                page.update()
+            except Exception as exc:
+                host_status.value = f"启动失败：{exc}"
+                page.update()
+
+        async def connect_and_sync(e):
+            try:
+                client_status.value = "正在双向同步……"
+                page.update()
+                raw = await asyncio.to_thread(
+                    sync_with_peer,
+                    address_input.value or "",
+                    code_input.value or "",
+                    backup_bytes(),
+                )
+                with records_lock:
+                    merged = import_backup_bytes(raw, records)
+                    records.clear()
+                    records.extend(merged)
+                    save_records(records)
+                client_status.value = "同步成功：两端数据已合并，本机已保存最新结果。"
+                render_list()
+            except Exception as exc:
+                client_status.value = f"同步失败：{exc}"
+                page.update()
+
+        dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("局域网双向同步 · v0.2"),
+            content=ft.Container(
+                width=560,
+                content=ft.Column(
+                    [
+                        ft.Text("方式一：这台设备作为主机", size=18, weight=ft.FontWeight.BOLD),
+                        ft.Text(
+                            "两台设备连接同一个 Wi-Fi / 局域网后，点击启动。另一台安装本应用的设备可输入下面的地址和配对码直接双向同步；也可用手机系统相机扫描二维码，在浏览器中下载/上传备份。",
+                            size=13,
+                        ),
+                        ft.Button("启动本机同步服务", icon=ft.Icons.WIFI_TETHERING, on_click=start_host),
+                        host_status,
+                        host_info,
+                        ft.Container(content=qr_image, alignment=ft.Alignment.CENTER),
+                        ft.Divider(),
+                        ft.Text("方式二：连接另一台设备", size=18, weight=ft.FontWeight.BOLD),
+                        ft.Text("输入对方显示的局域网地址与 6 位配对码，点一次即可把两端生日数据合并。", size=13),
+                        address_input,
+                        code_input,
+                        ft.Button("双向同步", icon=ft.Icons.SYNC, on_click=connect_and_sync),
+                        client_status,
+                        ft.Text("安全限制：客户端只允许连接私有/本地 IP；同步服务仅在当前局域网临时开放，关闭此窗口后立即停止。", size=12),
+                    ],
+                    tight=True,
+                    scroll=ft.ScrollMode.AUTO,
+                ),
+            ),
+            actions=[ft.TextButton("关闭", on_click=close_dialog)],
+        )
+        page.show_dialog(dialog)
+
     page.add(
         ft.SafeArea(
             content=ft.Column(
@@ -329,7 +451,7 @@ async def main(page: ft.Page):
                         [
                             ft.Column([
                                 ft.Text("家庭生日管理器", size=28, weight=ft.FontWeight.BOLD),
-                                ft.Text("公历 + 农历 · 完全离线 · Windows / Android", size=13),
+                                ft.Text("公历 + 农历 · 完全离线 · Windows / Android · v0.2 开发版", size=13),
                             ], spacing=2, expand=True),
                             ft.Button("添加生日", icon=ft.Icons.ADD, on_click=lambda e: open_editor()),
                         ]
@@ -348,6 +470,7 @@ async def main(page: ft.Page):
                     ),
                     ft.Row(
                         [
+                            ft.Button("局域网双向同步", icon=ft.Icons.WIFI_TETHERING, on_click=open_lan_sync),
                             ft.Button("导出备份", icon=ft.Icons.SAVE_ALT, on_click=export_backup),
                             ft.Button("导入并合并", icon=ft.Icons.MERGE, on_click=import_backup),
                             ft.Button("分享备份", icon=ft.Icons.SHARE, on_click=share_backup),
