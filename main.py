@@ -477,6 +477,147 @@ async def main(page: ft.Page):
         except Exception as exc:
             set_status(str(exc))
 
+    def open_reminder_settings(e=None):
+        enabled = ft.Switch(label="启用应用自己的本地通知", value=reminder_settings.enabled)
+        hour = ft.TextField(
+            label="提醒小时",
+            value=str(reminder_settings.hour),
+            keyboard_type=ft.KeyboardType.NUMBER,
+            width=130,
+        )
+        minute = ft.TextField(
+            label="分钟",
+            value=str(reminder_settings.minute),
+            keyboard_type=ft.KeyboardType.NUMBER,
+            width=130,
+        )
+        horizon = ft.Dropdown(
+            label="预排未来",
+            value=str(reminder_settings.horizon_years),
+            options=[
+                ft.DropdownOption(key="1", text="1 年"),
+                ft.DropdownOption(key="2", text="2 年"),
+                ft.DropdownOption(key="3", text="3 年"),
+                ft.DropdownOption(key="5", text="5 年"),
+            ],
+            width=150,
+        )
+        dialog_status = ft.Text("", size=13)
+
+        def preview_count() -> int:
+            try:
+                preview = ReminderSettings(
+                    enabled=bool(enabled.value),
+                    hour=int(hour.value or 0),
+                    minute=int(minute.value or 0),
+                    horizon_years=int(horizon.value or 3),
+                )
+                with records_lock:
+                    snapshot = [BirthdayRecord.from_dict(r.to_dict()) for r in records]
+                return len(build_reminder_occurrences(snapshot, preview))
+            except Exception:
+                return 0
+
+        async def test_notification(e):
+            try:
+                if is_android():
+                    if android_notifications is None:
+                        raise RuntimeError("Android 通知服务不可用。")
+                    granted = await android_notifications.request_permissions()
+                    if not granted:
+                        dialog_status.value = "系统未授予通知权限。"
+                        page.update()
+                        return
+                    await android_notifications.show_test_notification()
+                elif is_windows():
+                    await asyncio.to_thread(show_windows_test_notification)
+                else:
+                    dialog_status.value = "当前平台暂不支持应用通知；请继续使用 ICS。"
+                    page.update()
+                    return
+                dialog_status.value = "测试通知已发送。"
+                page.update()
+            except Exception as exc:
+                dialog_status.value = f"测试通知失败：{exc}"
+                page.update()
+
+        async def save_and_refresh(e):
+            try:
+                new_settings = ReminderSettings(
+                    enabled=bool(enabled.value),
+                    hour=int(hour.value or 0),
+                    minute=int(minute.value or 0),
+                    horizon_years=int(horizon.value or 3),
+                )
+                new_settings.validate()
+
+                reminder_settings.enabled = new_settings.enabled
+                reminder_settings.hour = new_settings.hour
+                reminder_settings.minute = new_settings.minute
+                reminder_settings.horizon_years = new_settings.horizon_years
+                save_reminder_settings(reminder_settings)
+
+                if reminder_settings.enabled and is_android():
+                    if android_notifications is None:
+                        raise RuntimeError("Android 通知服务不可用。")
+                    granted = await android_notifications.request_permissions()
+                    if not granted:
+                        reminder_settings.enabled = False
+                        save_reminder_settings(reminder_settings)
+                        enabled.value = False
+                        dialog_status.value = "未获得 Android 通知权限，提醒未启用。ICS 不受影响。"
+                        page.update()
+                        return
+
+                await refresh_local_reminders(announce=False)
+                count = preview_count()
+                dialog_status.value = (
+                    f"已保存。当前预计注册 {count} 条本地提醒。"
+                    if reminder_settings.enabled
+                    else "已关闭应用本地通知；ICS 仍可继续作为兜底。"
+                )
+                page.update()
+            except Exception as exc:
+                dialog_status.value = f"保存失败：{exc}"
+                page.update()
+
+        platform_hint = (
+            "Windows：提醒交给系统 Scheduled Toast，应用退出后仍可触发。"
+            if is_windows()
+            else "Android：提醒交给系统 AlarmManager / NotificationManager；应用不需要常驻。"
+            if is_android()
+            else "当前平台只保留 ICS 提醒。"
+        )
+
+        dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("本地提醒设置 · v0.3"),
+            content=ft.Container(
+                width=520,
+                content=ft.Column(
+                    [
+                        ft.Text(platform_hint, size=13),
+                        enabled,
+                        ft.Row([hour, minute, horizon], wrap=True),
+                        ft.Text(
+                            "每个人可在“编辑生日”里单独选择：提前 7 天、提前 1 天、当天。"
+                            "默认提醒时间为本机当地时间 09:00；本地通知只预排有限年数，ICS 仍导出 20 年作为长期兜底。",
+                            size=13,
+                        ),
+                        dialog_status,
+                    ],
+                    tight=True,
+                    scroll=ft.ScrollMode.AUTO,
+                ),
+            ),
+            actions=[
+                ft.TextButton("发送测试通知", on_click=test_notification),
+                ft.TextButton("关闭", on_click=lambda e: page.pop_dialog()),
+                ft.Button("保存并刷新提醒", icon=ft.Icons.NOTIFICATIONS_ACTIVE, on_click=save_and_refresh),
+            ],
+        )
+        page.show_dialog(dialog)
+
     async def handle_global_keyboard(e: ft.KeyboardEvent):
         # Flutter 有时收不到被 Windows Shell 截获的 Win+V；能收到时仍作为
         # 快速路径保留，后台 Win32 轮询负责兜底。
