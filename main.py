@@ -366,6 +366,10 @@ async def main(page: ft.Page):
                 ft.DropdownOption(key="skip", text="该年不过 / 不生成提醒"),
             ],
         )
+        existing_reminders = set(existing.reminders if existing and existing.reminders is not None else [7, 1, 0])
+        reminder_7 = ft.Checkbox(label="提前 7 天", value=7 in existing_reminders)
+        reminder_1 = ft.Checkbox(label="提前 1 天", value=1 in existing_reminders)
+        reminder_0 = ft.Checkbox(label="当天", value=0 in existing_reminders)
         notes = ft.TextField(label="备注（可选）", value=(existing.notes if existing else ""), multiline=True, min_lines=2, max_lines=4)
         form_error = ft.Text("", color=ft.Colors.ERROR)
 
@@ -399,6 +403,10 @@ async def main(page: ft.Page):
                     existing.leap_month = bool(leap_month.value) if calendar.value == "lunar" else False
                     existing.leap_policy = leap_policy.value or "normal"
                     existing.notes = notes.value.strip()
+                    existing.reminders = [
+                        days for days, control in ((7, reminder_7), (1, reminder_1), (0, reminder_0))
+                        if bool(control.value)
+                    ]
                     existing.deleted = False
                     existing.touch()
                     validate_record(existing)
@@ -414,9 +422,14 @@ async def main(page: ft.Page):
                         leap_policy=leap_policy.value or "normal",
                         notes=notes.value,
                     )
+                    new_record.reminders = [
+                        days for days, control in ((7, reminder_7), (1, reminder_1), (0, reminder_0))
+                        if bool(control.value)
+                    ]
                     validate_record(new_record)
                     records.append(new_record)
                 save_all()
+                queue_reminder_refresh()
                 page.pop_dialog()
                 quick.value = ""
                 set_status("已保存到本机。")
@@ -439,6 +452,8 @@ async def main(page: ft.Page):
                         birth_year,
                         leap_month,
                         leap_policy,
+                        ft.Text("提醒（可多选，也可以全部关闭）", weight=ft.FontWeight.BOLD),
+                        ft.Row([reminder_7, reminder_1, reminder_0], wrap=True),
                         notes,
                         form_error,
                     ],
