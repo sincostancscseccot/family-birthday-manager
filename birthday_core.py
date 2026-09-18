@@ -231,7 +231,7 @@ def build_ics(records: list[BirthdayRecord], years: int = 20, today: date | None
                 f"DESCRIPTION:{description}",
                 "CATEGORIES:Family,Birthday",
             ])
-            for days in sorted(set(record.reminders or [7, 1, 0]), reverse=True):
+            for days in sorted(set(record.reminders if record.reminders is not None else [7, 1, 0]), reverse=True):
                 trigger = "-PT0M" if days == 0 else f"-P{int(days)}D"
                 lines.extend([
                     "BEGIN:VALARM", f"TRIGGER:{trigger}", "ACTION:DISPLAY",
