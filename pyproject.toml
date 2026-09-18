@@ -6,7 +6,7 @@ requires-python = ">=3.10,<3.15"
 dependencies = [
   "flet[all]==1.0.0",
   "lunardate==0.3.0",
-  "qrcode[pil]==8.2",
+  "qrcode==8.2",
 ]
 
 [tool.flet]
@@ -17,3 +17,10 @@ build_number = 2
 
 [tool.flet.app]
 module = "main.py"
+
+
+[tool.flet.android.manifest_application]
+usesCleartextTraffic = "true"
+
+[tool.flet.android.permission]
+"android.permission.INTERNET" = true
