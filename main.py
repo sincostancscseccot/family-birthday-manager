@@ -187,9 +187,64 @@ async def main(page: ft.Page):
         status.value = message
         page.update()
 
+    def track_task(task: asyncio.Task) -> None:
+        background_tasks.append(task)
+
+        def _remove(done: asyncio.Task):
+            try:
+                background_tasks.remove(done)
+            except ValueError:
+                pass
+
+        task.add_done_callback(_remove)
+
     def save_all():
         with records_lock:
             save_records(records)
+
+    async def refresh_local_reminders(
+        *,
+        announce: bool = False,
+        request_permission: bool = False,
+    ) -> None:
+        if shutting_down:
+            return
+        try:
+            if is_android():
+                if android_notifications is None:
+                    raise RuntimeError("Android 通知服务不可用。")
+                if request_permission:
+                    granted = await android_notifications.request_permissions()
+                    if not granted:
+                        reminder_settings.enabled = False
+                        save_reminder_settings(reminder_settings)
+                        if announce:
+                            set_status("未获得 Android 通知权限，本地提醒保持关闭。ICS 仍可正常使用。")
+                        return
+                elif reminder_settings.enabled and not await android_notifications.notifications_enabled():
+                    if announce:
+                        set_status("Android 系统通知权限目前关闭；请在提醒设置中重新启用。")
+                    return
+
+            with records_lock:
+                snapshot = [BirthdayRecord.from_dict(r.to_dict()) for r in records]
+
+            result = await refresh_platform_notifications(
+                platform_name(),
+                snapshot,
+                reminder_settings,
+                android_notifications,
+            )
+            if announce:
+                set_status(result.message)
+        except Exception as exc:
+            if announce:
+                set_status(f"刷新本地提醒失败：{exc}")
+
+    def queue_reminder_refresh() -> None:
+        if not reminder_settings.enabled or shutting_down:
+            return
+        track_task(asyncio.create_task(refresh_local_reminders()))
 
     def backup_bytes() -> bytes:
         with records_lock:
@@ -264,6 +319,7 @@ async def main(page: ft.Page):
         record.deleted = True
         record.touch()
         save_all()
+        queue_reminder_refresh()
         set_status(f"已删除：{record.name}（离线同步时会保留删除标记）")
         render_list()
 
