@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 import asyncio
+import sys
 import threading
 
 import flet as ft
@@ -28,10 +29,73 @@ async def main(page: ft.Page):
     records_lock = threading.RLock()
     lan_server: LanSyncServer | None = None
     status = ft.Text("", size=13)
+
+    quick_focused = False
+    win_v_pending = False
+    win_v_quick_snapshot = ""
+    win_v_clipboard_snapshot: str | None = None
+
+    def is_windows() -> bool:
+        return sys.platform == "win32" or str(page.platform).lower().endswith("windows")
+
+    def win_v_keys_down() -> bool:
+        if sys.platform != "win32":
+            return False
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            v_down = bool(user32.GetAsyncKeyState(0x56) & 0x8000)
+            left_win = bool(user32.GetAsyncKeyState(0x5B) & 0x8000)
+            right_win = bool(user32.GetAsyncKeyState(0x5C) & 0x8000)
+            return v_down and (left_win or right_win)
+        except Exception:
+            return False
+
+    async def arm_win_v_history() -> None:
+        nonlocal win_v_pending, win_v_quick_snapshot, win_v_clipboard_snapshot
+        if not is_windows():
+            return
+        try:
+            win_v_clipboard_snapshot = await ft.Clipboard().get()
+        except Exception:
+            win_v_clipboard_snapshot = None
+        win_v_quick_snapshot = quick.value or ""
+        win_v_pending = True
+
+    async def paste_quick_from_clipboard(e=None, *, announce: bool = True) -> None:
+        try:
+            contents = await ft.Clipboard().get()
+        except Exception as exc:
+            if announce:
+                set_status(f"读取剪贴板失败：{exc}")
+            return
+        if not contents:
+            if announce:
+                set_status("剪贴板里没有可粘贴的文本。")
+            return
+        quick.value = contents
+        quick.update()
+        if announce:
+            set_status("已从系统剪贴板粘贴到“快速添加”。")
+
+    async def on_quick_focus(e) -> None:
+        nonlocal quick_focused
+        quick_focused = True
+
+    async def on_quick_blur(e) -> None:
+        nonlocal quick_focused
+        # Windows 的 Win+V 面板可能先让 TextField 失焦，且不会走 Flutter
+        # 的普通粘贴路径。趁组合键仍按下时记住这次操作。
+        if quick_focused and win_v_keys_down():
+            await arm_win_v_history()
+        quick_focused = False
+
     quick = ft.TextField(
         label="快速添加",
         hint_text="例如：奶奶 农历腊月二十 / 妈妈 公历5月12日",
         expand=True,
+        on_focus=on_quick_focus,
+        on_blur=on_quick_blur,
     )
     birthday_list = ft.Column(spacing=8)
 
@@ -262,6 +326,38 @@ async def main(page: ft.Page):
         except Exception as exc:
             set_status(str(exc))
 
+    async def handle_global_keyboard(e: ft.KeyboardEvent):
+        # Flet 能收到 Meta/Windows 修饰键时，这是最直接的 Win+V 检测路径。
+        if is_windows() and quick_focused and e.meta and str(e.key).lower() == "v":
+            await arm_win_v_history()
+
+    async def handle_window_event(e: ft.WindowEvent):
+        nonlocal win_v_pending, win_v_quick_snapshot, win_v_clipboard_snapshot
+        if not is_windows():
+            return
+        if e.type == ft.WindowEventType.FOCUS and win_v_pending:
+            # 给 Windows 剪贴板历史面板一点时间完成“选择并返回应用”。
+            await asyncio.sleep(0.12)
+            try:
+                contents = await ft.Clipboard().get()
+                # 仅当用户没有在等待期间修改输入框时自动补入，避免覆盖输入。
+                if contents and (quick.value or "") == win_v_quick_snapshot:
+                    quick.value = contents
+                    quick.update()
+                    if contents != win_v_clipboard_snapshot:
+                        status.value = "已接收 Win+V 选中的剪贴板历史内容。"
+                    else:
+                        status.value = "已从 Win+V 剪贴板历史粘贴。"
+                    page.update()
+            finally:
+                win_v_pending = False
+                win_v_quick_snapshot = ""
+                win_v_clipboard_snapshot = None
+
+    page.on_keyboard_event = handle_global_keyboard
+    if is_windows():
+        page.window.on_event = handle_window_event
+
     async def export_backup(e):
         data = backup_bytes()
         name = f"家庭生日备份_{date.today():%Y%m%d}.json"
@@ -457,7 +553,17 @@ async def main(page: ft.Page):
                         ]
                     ),
                     ft.Divider(),
-                    ft.Row([quick, ft.Button("识别并添加", icon=ft.Icons.AUTO_AWESOME, on_click=handle_quick_add)]),
+                    ft.Row(
+                        [
+                            quick,
+                            ft.IconButton(
+                                icon=ft.Icons.CONTENT_PASTE,
+                                tooltip="从系统剪贴板粘贴",
+                                on_click=paste_quick_from_clipboard,
+                            ),
+                            ft.Button("识别并添加", icon=ft.Icons.AUTO_AWESOME, on_click=handle_quick_add),
+                        ]
+                    ),
                     status,
                     ft.Text("最近生日", size=20, weight=ft.FontWeight.BOLD),
                     birthday_list,
