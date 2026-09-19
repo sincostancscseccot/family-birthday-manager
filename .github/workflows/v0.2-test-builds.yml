@@ -125,6 +125,24 @@ jobs:
             --build-number="$GITHUB_RUN_NUMBER"
           test -f build/app/outputs/flutter-apk/app-release.apk
 
+      - name: Verify final APK notification manifest
+        shell: bash
+        run: |
+          APK="build/flutter/build/app/outputs/flutter-apk/app-release.apk"
+          APKANALYZER="$(find "$ANDROID_HOME" -type f -name apkanalyzer -print -quit)"
+          test -f "$APK"
+          test -n "$APKANALYZER"
+
+          "$APKANALYZER" manifest print "$APK" > android-manifest-final.xml
+
+          grep -q "android.permission.POST_NOTIFICATIONS" android-manifest-final.xml
+          grep -q "android.permission.SCHEDULE_EXACT_ALARM" android-manifest-final.xml
+          grep -q "android.permission.RECEIVE_BOOT_COMPLETED" android-manifest-final.xml
+          grep -q "com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver" android-manifest-final.xml
+          grep -q "com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver" android-manifest-final.xml
+
+          echo "Final APK contains notification permissions and receivers."
+
       - name: Package APK
         shell: bash
         run: |
