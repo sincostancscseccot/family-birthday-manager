@@ -1,4 +1,4 @@
-name: v0.2 test builds
+name: v0.3 reminder test builds
 
 on:
   pull_request:
@@ -29,39 +29,137 @@ jobs:
         run: python -m pytest -q
 
       - name: Compile-check Python sources
-        run: python -m compileall -q main.py birthday_core.py storage.py lan_sync.py
+        run: python -m compileall -q main.py birthday_core.py storage.py lan_sync.py reminder_engine.py notification_backends.py
 
-  build:
-    name: Build ${{ matrix.target }}
+  windows:
+    name: Build windows
     needs: tests
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: windows
-            runner: windows-latest
-          - target: apk
-            runner: ubuntu-latest
-
+    runs-on: windows-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Build Flet app
+      - name: Build Flet Windows app
         id: flet-build
         uses: flet-dev/flet-build-action@v1
         with:
-          target: ${{ matrix.target }}
+          target: windows
           runner-python-version: "3.13"
           bundled-python-version: "3.13"
           build-number: ${{ github.run_number }}
 
-      - name: Upload test build
+      - name: Upload Windows test build
         uses: actions/upload-artifact@v7
         with:
-          name: family-birthday-${{ matrix.target }}-v0.2-test-${{ github.run_number }}
+          name: family-birthday-windows-v0.3-test-${{ github.run_number }}
           path: ${{ steps.flet-build.outputs.archive-path }}
           archive: false
           if-no-files-found: error
-          overwrite: false
+
+  android:
+    name: Build patched Android APK
+    needs: tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install Android notification patcher
+        run: python -m pip install --upgrade pip "flet[all]==1.0.0" "flet-android-notifications==0.11.2"
+
+      - name: Generate Android project
+        id: first-build
+        continue-on-error: true
+        uses: flet-dev/flet-build-action@v1
+        with:
+          target: apk
+          runner-python-version: "3.13"
+          bundled-python-version: "3.13"
+          build-number: ${{ github.run_number }}
+
+      - name: Verify generated Flutter project
+        shell: bash
+        run: |
+          test -d build/flutter
+          test -f build/flutter/pubspec.yaml
+
+      - name: Patch notification receivers and desugaring
+        run: flet-android-notifications-patch --project-root build/flutter
+
+      - name: Rebuild patched APK
+        shell: bash
+        run: |
+          ROOT="$GITHUB_WORKSPACE"
+          FLUTTER_BIN="$(find "$HOME/flutter" -type f -path "*/bin/flutter" -print -quit)"
+          SITE_PACKAGES="$ROOT/build/site-packages"
+
+          APP_DIR=""
+          for candidate in "$ROOT/build/python-app" "$ROOT/build/app"; do
+            if [ -d "$candidate" ]; then
+              APP_DIR="$candidate"
+              break
+            fi
+          done
+
+          test -n "$FLUTTER_BIN"
+          test -d "$SITE_PACKAGES"
+          test -n "$APP_DIR"
+          test -d "$APP_DIR"
+
+          echo "Using Flutter: $FLUTTER_BIN"
+          echo "SERIOUS_PYTHON_SITE_PACKAGES=$SITE_PACKAGES"
+          echo "SERIOUS_PYTHON_APP=$APP_DIR"
+
+          export SERIOUS_PYTHON_SITE_PACKAGES="$SITE_PACKAGES"
+          export SERIOUS_PYTHON_APP="$APP_DIR"
+          export SERIOUS_PYTHON_VERSION="3.13"
+
+          cd build/flutter
+          "$FLUTTER_BIN" build apk --release \
+            --build-name=0.3.0 \
+            --build-number="$GITHUB_RUN_NUMBER"
+          test -f build/app/outputs/flutter-apk/app-release.apk
+
+      - name: Verify final APK notification manifest
+        shell: bash
+        run: |
+          APK="build/flutter/build/app/outputs/flutter-apk/app-release.apk"
+          APKANALYZER="$(find "$ANDROID_HOME" -type f -name apkanalyzer -print -quit)"
+          test -f "$APK"
+          test -n "$APKANALYZER"
+
+          "$APKANALYZER" manifest print "$APK" > android-manifest-final.xml
+
+          grep -q "android.permission.POST_NOTIFICATIONS" android-manifest-final.xml
+          grep -q "android.permission.SCHEDULE_EXACT_ALARM" android-manifest-final.xml
+          grep -q "android.permission.RECEIVE_BOOT_COMPLETED" android-manifest-final.xml
+          grep -q "com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver" android-manifest-final.xml
+          grep -q "com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver" android-manifest-final.xml
+
+          echo "Final APK contains notification permissions and receivers."
+
+      - name: Package APK
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import zipfile
+          apk = Path("build/flutter/build/app/outputs/flutter-apk/app-release.apk")
+          out = Path("family-birthday-manager-v0.3-test-android-apk.zip")
+          with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as z:
+              z.write(apk, arcname="family_birthday_manager.apk")
+          print(out)
+          PY
+
+      - name: Upload Android test build
+        uses: actions/upload-artifact@v7
+        with:
+          name: family-birthday-android-v0.3-test-${{ github.run_number }}
+          path: family-birthday-manager-v0.3-test-android-apk.zip
+          archive: false
+          if-no-files-found: error

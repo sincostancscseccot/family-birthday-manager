@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 from birthday_core import BirthdayRecord, merge_records
+from reminder_engine import ReminderSettings
 
 SCHEMA_VERSION = 1
 
@@ -59,3 +60,26 @@ def import_backup_bytes(raw: bytes, local: list[BirthdayRecord]) -> list[Birthda
         raise ValueError("备份版本不兼容")
     incoming = [BirthdayRecord.from_dict(x) for x in payload.get("records", [])]
     return merge_records(local, incoming)
+
+
+def reminder_settings_file() -> Path:
+    return data_dir() / "reminder_settings.json"
+
+
+def load_reminder_settings() -> ReminderSettings:
+    path = reminder_settings_file()
+    if not path.exists():
+        return ReminderSettings()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return ReminderSettings.from_dict(payload)
+    except Exception:
+        return ReminderSettings()
+
+
+def save_reminder_settings(settings: ReminderSettings) -> None:
+    settings.validate()
+    target = reminder_settings_file()
+    tmp = target.with_suffix(".tmp")
+    tmp.write_text(json.dumps(settings.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(target)

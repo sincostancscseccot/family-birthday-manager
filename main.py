@@ -16,8 +16,21 @@ from birthday_core import (
     parse_quick,
     validate_record,
 )
-from storage import export_backup_bytes, import_backup_bytes, load_records, save_records
+from storage import (
+    export_backup_bytes,
+    import_backup_bytes,
+    load_records,
+    load_reminder_settings,
+    save_records,
+    save_reminder_settings,
+)
 from lan_sync import LanSyncServer, qr_svg, sync_with_peer
+from reminder_engine import ReminderSettings, build_reminder_occurrences
+from notification_backends import (
+    AndroidReminderBackend,
+    refresh_platform_notifications,
+    show_windows_test_notification,
+)
 
 
 async def main(page: ft.Page):
@@ -27,8 +40,10 @@ async def main(page: ft.Page):
     page.theme_mode = ft.ThemeMode.SYSTEM
 
     records = load_records()
+    reminder_settings = load_reminder_settings()
     records_lock = threading.RLock()
     lan_server: LanSyncServer | None = None
+    android_notifications: AndroidReminderBackend | None = None
     status = ft.Text("", size=13)
     shutting_down = False
     background_tasks: list[asyncio.Task] = []
@@ -40,8 +55,20 @@ async def main(page: ft.Page):
     win_v_clipboard_sequence: int | None = None
     win_v_deadline = 0.0
 
+    def platform_name() -> str:
+        return str(page.platform).lower()
+
     def is_windows() -> bool:
-        return sys.platform == "win32" or str(page.platform).lower().endswith("windows")
+        return sys.platform == "win32" or platform_name().endswith("windows")
+
+    def is_android() -> bool:
+        return platform_name().endswith("android")
+
+    if is_android():
+        try:
+            android_notifications = AndroidReminderBackend()
+        except Exception as exc:
+            status.value = f"Android 通知服务初始化失败：{exc}"
 
     def win_v_keys_down() -> bool:
         if sys.platform != "win32":
@@ -122,6 +149,12 @@ async def main(page: ft.Page):
         on_blur=on_quick_blur,
     )
     birthday_list = ft.Column(spacing=8)
+    reminder_summary = ft.Text(
+        "应用本地通知 + ICS 双保险"
+        if reminder_settings.enabled
+        else "应用本地通知未启用；ICS 仍可使用",
+        size=13,
+    )
 
     def active_records():
         with records_lock:
@@ -160,9 +193,64 @@ async def main(page: ft.Page):
         status.value = message
         page.update()
 
+    def track_task(task: asyncio.Task) -> None:
+        background_tasks.append(task)
+
+        def _remove(done: asyncio.Task):
+            try:
+                background_tasks.remove(done)
+            except ValueError:
+                pass
+
+        task.add_done_callback(_remove)
+
     def save_all():
         with records_lock:
             save_records(records)
+
+    async def refresh_local_reminders(
+        *,
+        announce: bool = False,
+        request_permission: bool = False,
+    ) -> None:
+        if shutting_down:
+            return
+        try:
+            if is_android():
+                if android_notifications is None:
+                    raise RuntimeError("Android 通知服务不可用。")
+                if request_permission:
+                    granted = await android_notifications.request_permissions()
+                    if not granted:
+                        reminder_settings.enabled = False
+                        save_reminder_settings(reminder_settings)
+                        if announce:
+                            set_status("未获得 Android 通知权限，本地提醒保持关闭。ICS 仍可正常使用。")
+                        return
+                elif reminder_settings.enabled and not await android_notifications.notifications_enabled():
+                    if announce:
+                        set_status("Android 系统通知权限目前关闭；请在提醒设置中重新启用。")
+                    return
+
+            with records_lock:
+                snapshot = [BirthdayRecord.from_dict(r.to_dict()) for r in records]
+
+            result = await refresh_platform_notifications(
+                platform_name(),
+                snapshot,
+                reminder_settings,
+                android_notifications,
+            )
+            if announce:
+                set_status(result.message)
+        except Exception as exc:
+            if announce:
+                set_status(f"刷新本地提醒失败：{exc}")
+
+    def queue_reminder_refresh() -> None:
+        if not reminder_settings.enabled or shutting_down:
+            return
+        track_task(asyncio.create_task(refresh_local_reminders()))
 
     def backup_bytes() -> bytes:
         with records_lock:
@@ -237,6 +325,7 @@ async def main(page: ft.Page):
         record.deleted = True
         record.touch()
         save_all()
+        queue_reminder_refresh()
         set_status(f"已删除：{record.name}（离线同步时会保留删除标记）")
         render_list()
 
@@ -283,6 +372,10 @@ async def main(page: ft.Page):
                 ft.DropdownOption(key="skip", text="该年不过 / 不生成提醒"),
             ],
         )
+        existing_reminders = set(existing.reminders if existing and existing.reminders is not None else [7, 1, 0])
+        reminder_7 = ft.Checkbox(label="提前 7 天", value=7 in existing_reminders)
+        reminder_1 = ft.Checkbox(label="提前 1 天", value=1 in existing_reminders)
+        reminder_0 = ft.Checkbox(label="当天", value=0 in existing_reminders)
         notes = ft.TextField(label="备注（可选）", value=(existing.notes if existing else ""), multiline=True, min_lines=2, max_lines=4)
         form_error = ft.Text("", color=ft.Colors.ERROR)
 
@@ -316,6 +409,10 @@ async def main(page: ft.Page):
                     existing.leap_month = bool(leap_month.value) if calendar.value == "lunar" else False
                     existing.leap_policy = leap_policy.value or "normal"
                     existing.notes = notes.value.strip()
+                    existing.reminders = [
+                        days for days, control in ((7, reminder_7), (1, reminder_1), (0, reminder_0))
+                        if bool(control.value)
+                    ]
                     existing.deleted = False
                     existing.touch()
                     validate_record(existing)
@@ -331,9 +428,14 @@ async def main(page: ft.Page):
                         leap_policy=leap_policy.value or "normal",
                         notes=notes.value,
                     )
+                    new_record.reminders = [
+                        days for days, control in ((7, reminder_7), (1, reminder_1), (0, reminder_0))
+                        if bool(control.value)
+                    ]
                     validate_record(new_record)
                     records.append(new_record)
                 save_all()
+                queue_reminder_refresh()
                 page.pop_dialog()
                 quick.value = ""
                 set_status("已保存到本机。")
@@ -356,6 +458,8 @@ async def main(page: ft.Page):
                         birth_year,
                         leap_month,
                         leap_policy,
+                        ft.Text("提醒（可多选，也可以全部关闭）", weight=ft.FontWeight.BOLD),
+                        ft.Row([reminder_7, reminder_1, reminder_0], wrap=True),
                         notes,
                         form_error,
                     ],
@@ -378,6 +482,191 @@ async def main(page: ft.Page):
             set_status("已识别，确认后保存即可。")
         except Exception as exc:
             set_status(str(exc))
+
+    def open_reminder_settings(e=None):
+        enabled = ft.Switch(label="启用应用自己的本地通知", value=reminder_settings.enabled)
+        hour = ft.TextField(
+            label="提醒小时",
+            value=str(reminder_settings.hour),
+            keyboard_type=ft.KeyboardType.NUMBER,
+            width=130,
+        )
+        minute = ft.TextField(
+            label="分钟",
+            value=str(reminder_settings.minute),
+            keyboard_type=ft.KeyboardType.NUMBER,
+            width=130,
+        )
+        horizon = ft.Dropdown(
+            label="预排未来",
+            value=str(reminder_settings.horizon_years),
+            options=[
+                ft.DropdownOption(key="1", text="1 年"),
+                ft.DropdownOption(key="2", text="2 年"),
+                ft.DropdownOption(key="3", text="3 年"),
+                ft.DropdownOption(key="5", text="5 年"),
+            ],
+            width=150,
+        )
+        dialog_status = ft.Text("", size=13)
+
+        def preview_count() -> int:
+            try:
+                preview = ReminderSettings(
+                    enabled=bool(enabled.value),
+                    hour=int(hour.value or 0),
+                    minute=int(minute.value or 0),
+                    horizon_years=int(horizon.value or 3),
+                )
+                with records_lock:
+                    snapshot = [BirthdayRecord.from_dict(r.to_dict()) for r in records]
+                return len(build_reminder_occurrences(snapshot, preview))
+            except Exception:
+                return 0
+
+        async def test_notification(e):
+            try:
+                if is_android():
+                    if android_notifications is None:
+                        raise RuntimeError("Android 通知服务不可用。")
+                    granted = await android_notifications.request_permissions()
+                    if not granted:
+                        dialog_status.value = "系统未授予通知权限。"
+                        page.update()
+                        return
+                    await android_notifications.show_test_notification()
+                elif is_windows():
+                    show_windows_test_notification()
+                else:
+                    dialog_status.value = "当前平台暂不支持应用通知；请继续使用 ICS。"
+                    page.update()
+                    return
+                dialog_status.value = "测试通知已发送。"
+                page.update()
+            except Exception as exc:
+                dialog_status.value = f"测试通知失败：{exc}"
+                page.update()
+
+        async def check_android_scheduler(e):
+            if not is_android():
+                dialog_status.value = "调度诊断仅适用于 Android。"
+                page.update()
+                return
+            if android_notifications is None:
+                dialog_status.value = "Android 通知服务不可用。"
+                page.update()
+                return
+            try:
+                notification_ok = await android_notifications.notifications_enabled()
+                exact_ok = await android_notifications.can_schedule_exact()
+                pending = await android_notifications.pending_notifications()
+                dialog_status.value = (
+                    f"Android 调度状态：通知权限={'已开启' if notification_ok else '未开启'}；"
+                    f"精确闹钟={'已允许' if exact_ok else '未允许'}；"
+                    f"系统当前记录的待触发通知={len(pending)} 条。"
+                )
+                page.update()
+            except Exception as exc:
+                dialog_status.value = f"读取 Android 调度状态失败：{exc}"
+                page.update()
+
+        async def save_and_refresh(e):
+            try:
+                new_settings = ReminderSettings(
+                    enabled=bool(enabled.value),
+                    hour=int(hour.value or 0),
+                    minute=int(minute.value or 0),
+                    horizon_years=int(horizon.value or 3),
+                )
+                new_settings.validate()
+
+                reminder_settings.enabled = new_settings.enabled
+                reminder_settings.hour = new_settings.hour
+                reminder_settings.minute = new_settings.minute
+                reminder_settings.horizon_years = new_settings.horizon_years
+                save_reminder_settings(reminder_settings)
+
+                exact_allowed = True
+                if reminder_settings.enabled and is_android():
+                    if android_notifications is None:
+                        raise RuntimeError("Android 通知服务不可用。")
+                    granted = await android_notifications.request_permissions()
+                    if not granted:
+                        reminder_settings.enabled = False
+                        save_reminder_settings(reminder_settings)
+                        enabled.value = False
+                        dialog_status.value = "未获得 Android 通知权限，提醒未启用。ICS 不受影响。"
+                        page.update()
+                        return
+
+                    exact_allowed = await android_notifications.can_schedule_exact()
+                    if not exact_allowed:
+                        # Android 12+ exact alarms are a separate special access.
+                        # The plugin opens the system page when needed.
+                        await android_notifications.request_exact_alarm_permission()
+                        await asyncio.sleep(0.2)
+                        exact_allowed = await android_notifications.can_schedule_exact()
+
+                await refresh_local_reminders(announce=False)
+                count = preview_count()
+                reminder_summary.value = (
+                    "应用本地通知 + ICS 双保险"
+                    if reminder_settings.enabled
+                    else "应用本地通知未启用；ICS 仍可使用"
+                )
+                if reminder_settings.enabled and is_android() and not exact_allowed:
+                    dialog_status.value = (
+                        f"已保存并注册约 {count} 条提醒，但尚未获得“精确闹钟”权限，"
+                        "当前只能使用兼容模式；清后台后可能不可靠。请授予精确闹钟权限后再点一次“保存并刷新提醒”。"
+                    )
+                else:
+                    dialog_status.value = (
+                        f"已保存。当前预计注册 {count} 条本地提醒。"
+                        if reminder_settings.enabled
+                        else "已关闭应用本地通知；ICS 仍可继续作为兜底。"
+                    )
+                page.update()
+            except Exception as exc:
+                dialog_status.value = f"保存失败：{exc}"
+                page.update()
+
+        platform_hint = (
+            "Windows：提醒交给系统 Scheduled Toast，应用退出后仍可触发。"
+            if is_windows()
+            else "Android：提醒交给系统 AlarmManager / NotificationManager；应用不需要常驻。"
+            if is_android()
+            else "当前平台只保留 ICS 提醒。"
+        )
+
+        dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("本地提醒设置 · v0.3"),
+            content=ft.Container(
+                width=520,
+                content=ft.Column(
+                    [
+                        ft.Text(platform_hint, size=13),
+                        enabled,
+                        ft.Row([hour, minute, horizon], wrap=True),
+                        ft.Text(
+                            "每个人可在“编辑生日”里单独选择：提前 7 天、提前 1 天、当天。"
+                            "默认提醒时间为本机当地时间 09:00；本地通知只预排有限年数，ICS 仍导出 20 年作为长期兜底。",
+                            size=13,
+                        ),
+                        dialog_status,
+                    ],
+                    tight=True,
+                    scroll=ft.ScrollMode.AUTO,
+                ),
+            ),
+            actions=[
+                ft.TextButton("发送测试通知", on_click=test_notification),
+                ft.TextButton("检查调度状态", on_click=check_android_scheduler, visible=is_android()),
+                ft.TextButton("关闭", on_click=lambda e: page.pop_dialog()),
+                ft.Button("保存并刷新提醒", icon=ft.Icons.NOTIFICATIONS_ACTIVE, on_click=save_and_refresh),
+            ],
+        )
+        page.show_dialog(dialog)
 
     async def handle_global_keyboard(e: ft.KeyboardEvent):
         # Flutter 有时收不到被 Windows Shell 截获的 Win+V；能收到时仍作为
@@ -501,6 +790,7 @@ async def main(page: ft.Page):
             records.clear()
             records.extend(merged)
             save_all()
+            queue_reminder_refresh()
             set_status("导入完成：已按记录 ID 和更新时间合并，不会简单覆盖另一端新增的数据。")
             render_list()
         except Exception as exc:
@@ -552,6 +842,7 @@ async def main(page: ft.Page):
 
         def close_dialog(e=None):
             stop_host()
+            queue_reminder_refresh()
             page.pop_dialog()
             render_list()
             set_status("局域网同步窗口已关闭。")
@@ -597,6 +888,7 @@ async def main(page: ft.Page):
                     records.clear()
                     records.extend(merged)
                     save_records(records)
+                queue_reminder_refresh()
                 client_status.value = "同步成功：两端数据已合并，本机已保存最新结果。"
                 render_list()
             except Exception as exc:
@@ -644,7 +936,7 @@ async def main(page: ft.Page):
                         [
                             ft.Column([
                                 ft.Text("家庭生日管理器", size=28, weight=ft.FontWeight.BOLD),
-                                ft.Text("公历 + 农历 · 完全离线 · Windows / Android · v0.2.0", size=13),
+                                ft.Text("公历 + 农历 · 完全离线 · Windows / Android · v0.3 开发版", size=13),
                             ], spacing=2, expand=True),
                             ft.Button("添加生日", icon=ft.Icons.ADD, on_click=lambda e: open_editor()),
                         ]
@@ -662,6 +954,13 @@ async def main(page: ft.Page):
                         ]
                     ),
                     status,
+                    ft.Row(
+                        [
+                            ft.Button("提醒设置", icon=ft.Icons.NOTIFICATIONS_ACTIVE, on_click=open_reminder_settings),
+                            reminder_summary,
+                        ],
+                        wrap=True,
+                    ),
                     ft.Text("最近生日", size=20, weight=ft.FontWeight.BOLD),
                     birthday_list,
                     ft.Divider(),
@@ -697,6 +996,8 @@ async def main(page: ft.Page):
         )
     )
     render_list()
+    if reminder_settings.enabled:
+        track_task(asyncio.create_task(refresh_local_reminders()))
 
 
 if __name__ == "__main__":
