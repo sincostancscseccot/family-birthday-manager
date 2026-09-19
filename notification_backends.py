@@ -93,7 +93,11 @@ class AndroidReminderBackend:
 
         occurrences = build_reminder_occurrences(records, settings)
         exact_allowed = await self.can_schedule_exact()
-        schedule_mode = "exact_allow_while_idle" if exact_allowed else "inexact_allow_while_idle"
+        # Experimental high-reliability mode for aggressive Android OEMs
+        # (e.g. REDMAGIC): alarm_clock maps to AlarmManager.setAlarmClock(),
+        # which Android treats as a user-visible alarm and gives higher priority
+        # than ordinary exact alarms.
+        schedule_mode = "alarm_clock" if exact_allowed else "inexact_allow_while_idle"
 
         for item in occurrences:
             await self.service.schedule_notification(
@@ -108,7 +112,7 @@ class AndroidReminderBackend:
                 schedule_mode=schedule_mode,
             )
 
-        mode_text = "精确后台模式" if exact_allowed else "非精确兼容模式"
+        mode_text = "闹钟级高可靠模式" if exact_allowed else "非精确兼容模式"
         return ReminderRefreshResult(
             "android",
             len(occurrences),
